@@ -7,6 +7,7 @@
 # shellcheck disable=SC2034
 # shellcheck source=../include/dts-environment.sh
 source $DTS_ENV
+source $DTS_SUBS
 
 ### Color functions:
 function echo_green() {
@@ -152,16 +153,26 @@ it5570_shutdown() {
 }
 
 check_network_connection() {
+  if wget --spider cloud.3mdeb.com > /dev/null 2>&1; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+wait_for_network_connection() {
   echo 'Waiting for network connection ...'
   n="10"
+
   while : ; do
-    if wget --spider cloud.3mdeb.com > /dev/null 2>&1; then
-      echo 'Network connection established.'
+    if check_network_connection; then
+      print_ok "Network connection have been established!"
       return 0
     fi
+
     n=$((n-1))
     if [ "${n}" == "0" ]; then
-      echo 'No network connection to 3mdeb cloud, please recheck Ethernet connection'
+      print_error "Could not connect to network, please check network connection!"
       return 1
     fi
     sleep 1
@@ -173,7 +184,7 @@ check_network_connection() {
 board_config() {
   # We download firmwares via network. At this point, the network connection
   # must be up already.
-  check_network_connection
+  wait_for_network_connection
 
   echo "Checking if board is Dasharo compatible."
   case "$SYSTEM_VENDOR" in
@@ -698,51 +709,6 @@ check_flash_chip() {
     done
     if [ -z "$FLASH_CHIP_SELECT" ]; then
       error_exit "No supported chipset found, exit."
-    fi
-  fi
-}
-
-check_se_creds() {
-  local _check_dwn_req_resp_uefi="0"
-  local _check_dwn_req_resp_heads="0"
-  local _check_logs_req_resp="0"
-  # Ignore "SC2154 (warning): SE_credential_file is referenced but not assigned"
-  # for external variable:
-  # shellcheck disable=SC2154
-  CLOUDSEND_LOGS_URL=$(sed -n '1p' < ${SE_credential_file} | tr -d '\n')
-  CLOUDSEND_DOWNLOAD_URL=$(sed -n '2p' < ${SE_credential_file} | tr -d '\n')
-  CLOUDSEND_PASSWORD=$(sed -n '3p' < ${SE_credential_file} | tr -d '\n')
-  USER_DETAILS="$CLOUDSEND_DOWNLOAD_URL:$CLOUDSEND_PASSWORD"
-  board_config
-  if [ "$?" == "1" ]; then
-    return 1
-  fi
-  TEST_LOGS_URL="https://cloud.3mdeb.com/index.php/s/${CLOUDSEND_LOGS_URL}/authenticate/showShare"
-
-  if [ ! -v BIOS_LINK_DES ] && [ ! -v HEADS_LINK_DES ]; then
-    print_error "There is no Dasharo Entry Subscription available for your platform!"
-    return 1
-  fi
-
-  if check_network_connection; then
-    if [ -v BIOS_LINK_DES ]; then
-      _check_dwn_req_resp_uefi=$(curl -L -I -s -f -u "$USER_DETAILS" -H "$CLOUD_REQUEST" "$BIOS_LINK_DES" -o /dev/null -w "%{http_code}")
-    fi
-    if [ -v HEADS_LINK_DES ]; then
-      _check_dwn_req_resp_heads=$(curl -L -I -s -f -u "$USER_DETAILS" -H "$CLOUD_REQUEST" "$HEADS_LINK_DES" -o /dev/null -w "%{http_code}")
-    fi
-
-    _check_logs_req_resp=$(curl -L -I -s -f -H "$CLOUD_REQUEST" "$TEST_LOGS_URL" -o /dev/null -w "%{http_code}")
-    if [ ${_check_dwn_req_resp_uefi} -eq 200 ] || [ ${_check_dwn_req_resp_heads} -eq 200 ]; then
-      if [ ${_check_logs_req_resp} -eq 200 ]; then
-        return 0
-      else
-        echo ""
-        return 1
-      fi
-    else
-      echo ""
-      return 1
     fi
   fi
 }
@@ -1322,6 +1288,9 @@ show_header() {
   echo -e "${NORMAL}\n Dasharo Tools Suite Script ${_os_version} ${NORMAL}"
   echo -e "${NORMAL} (c) Dasharo <contact@dasharo.com> ${NORMAL}"
   echo -e "${NORMAL} Report issues at: https://github.com/Dasharo/dasharo-issues ${NORMAL}"
+}
+
+show_hardsoft_inf() {
   echo -e "${BLUE}*********************************************************${NORMAL}"
   echo -e "${BLUE}**${NORMAL}                HARDWARE INFORMATION ${NORMAL}"
   echo -e "${BLUE}*********************************************************${NORMAL}"
@@ -1363,7 +1332,7 @@ show_ssh_info() {
   fi
 }
 
-show_menu() {
+show_main_menu() {
   echo -e "${BLUE}**${YELLOW}     ${HCL_REPORT_OPT})${BLUE} Dasharo HCL report${NORMAL}"
   if ! check_if_dasharo; then
     echo -e "${BLUE}**${YELLOW}     ${DASHARO_FIRM_OPT})${BLUE} Update Dasharo Firmware${NORMAL}"
@@ -1376,6 +1345,137 @@ show_menu() {
   else
     echo -e "${BLUE}**${YELLOW}     ${DES_KEYS_OPT})${BLUE} Load your DES keys${NORMAL}"
   fi
+  if [ -f "${DES_SUBMENU_JSON}" ]; then
+    echo -e "${BLUE}**${YELLOW}     ${DES_SUBMENU_OPT})${BLUE} Premium options${NORMAL}"
+  fi
+}
+
+main_menu_options(){
+  local OPTION=$1
+
+  case ${OPTION} in
+    "${HCL_REPORT_OPT}")
+      print_disclaimer
+      read -p "Do you want to support Dasharo development by sending us logs with your hardware configuration? [N/y] "
+      case ${REPLY} in
+          yes|y|Y|Yes|YES)
+          export SEND_LOGS="true"
+          echo "Thank you for contributing to the Dasharo development!"
+          ;;
+          *)
+          export SEND_LOGS="false"
+          echo "Logs will be saved in root directory."
+          echo "Please consider supporting Dasharo by sending the logs next time."
+          ;;
+      esac
+      if [ "${SEND_LOGS}" == "true" ]; then
+          # DEPLOY_REPORT variable is used in dasharo-hcl-report to determine
+          # which logs should be printed in the terminal, in the future whole
+          # dts scripting should get some LOGLEVEL and maybe dumping working
+          # logs to file
+          export DEPLOY_REPORT="false"
+          wait_for_network_connection && ${CMD_DASHARO_HCL_REPORT} && logs_sent="1"
+      else
+          export DEPLOY_REPORT="false"
+          ${CMD_DASHARO_HCL_REPORT}
+      fi
+      read -p "Press ENTER to continue."
+
+      return 0
+      ;;
+    "${DASHARO_FIRM_OPT}")
+      if ! check_if_dasharo; then
+        if wait_for_network_connection; then
+          echo "Preparing ..."
+          if [ -z "${logs_sent}" ]; then
+            export SEND_LOGS="true"
+            export DEPLOY_REPORT="true"
+            if ! ${CMD_DASHARO_HCL_REPORT}; then
+              echo -e "Unable to connect to cloud.3mdeb.com for submitting the
+                        \rHCL report. Please recheck your internet connection."
+            else
+              logs_sent="1"
+            fi
+          fi
+        fi
+
+        if [ -n "${logs_sent}" ]; then
+          ${CMD_DASHARO_DEPLOY} install
+        fi
+      else
+        # For NovaCustom TGL laptops with Dasharo version lower than 1.3.0,
+        # we shall run the ec_transition script instead. See:
+        # https://docs.dasharo.com/variants/novacustom_nv4x_tgl/releases/#v130-2022-10-18
+        if [ "$SYSTEM_VENDOR" = "Notebook" ]; then
+            case "$SYSTEM_MODEL" in
+              "NS50_70MU"|"NV4XMB,ME,MZ")
+                compare_versions $DASHARO_VERSION 1.3.0
+                if [ $? -eq 1 ]; then
+                # For Dasharo version lesser than 1.3.0
+                  print_warning "Detected NovaCustom hardware with version < 1.3.0"
+                  print_warning "Need to perform EC transition after which the platform will turn off"
+                  print_warning "Then, please power it on and proceed with update again"
+                  print_warning "EC transition procedure will start in 5 seconds"
+                  sleep 5
+                  ${CMD_EC_TRANSITION}
+                  error_check "Could not perform EC transition"
+                fi
+                # Continue with regular update process for Dasharo version
+                #  greater or equal 1.3.0
+                ;;
+            esac
+        fi
+
+        # Use regular update process for everything else
+        ${CMD_DASHARO_DEPLOY} update
+      fi
+      read -p "Press ENTER to continue."
+
+      return 0
+      ;;
+    "${REST_FIRM_OPT}")
+      if check_if_dasharo; then
+        ${CMD_DASHARO_DEPLOY} restore
+      fi
+      read -p "Press ENTER to continue."
+
+      return 0
+      ;;
+    "${DES_KEYS_OPT}")
+      get_des_creds
+
+      # Verify credentials, start loop over if there is smth wrong:
+      check_des_creds || return 0
+
+      # Try to log in using available DES credentials, start loop over if login
+      # was not successful:
+      login_to_des_server || return 0
+
+      # Check if there is some packages available to install, start loop over if
+      # no packages is available:
+      check_avail_des_packages || return 0
+
+      # Download and install available packages, start loop over if there is
+      # no packages tto install:
+      install_all_des_packages || return 0
+
+      # Parse installed packages for premium submenus:
+      parse_for_premium_submenu
+
+      read -p "Press ENTER to continue."
+      return 0
+      ;;
+    "${DES_SUBMENU_OPT}")
+      [ -f "$DES_SUBMENU_JSON" ] || return 0
+      export DES_SUBMENU_ACTIVE="true"
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+show_footer(){
   echo -e "${BLUE}*********************************************************${NORMAL}"
   echo -e "${YELLOW}Select a menu option or${NORMAL}"
   echo -ne "${RED}${REBOOT_OPT_UP}${NORMAL} to reboot  ${NORMAL}"
@@ -1386,4 +1486,45 @@ show_menu() {
   else
     echo -ne "${RED}${SSH_OPT_UP}${NORMAL} to launch SSH server  ${NORMAL}"
   fi
+}
+
+footer_options(){
+  local OPTION=$1
+
+  case ${OPTION} in
+    "${SSH_OPT_UP}" | "${SSH_OPT_LOW}")
+      wait_for_network_connection || return 0
+
+      if systemctl is-active sshd.socket > /dev/null 2>&1; then
+        print_ok "Turning off the SSH server..."
+        systemctl stop sshd.socket
+      else
+        print_warning "Starting SSH server!"
+        print_warning "Now you can log in into the system using root account."
+        print_warning "Stopping server will not drop all connected sessions."
+        systemctl start sshd.socket
+        print_ok "Listening on IPs: $(ip -br -f inet a show scope global | grep UP | awk '{ print $3 }' | tr '\n' ' ')"
+      fi
+      read -p "Press ENTER to continue."
+
+      return 0
+      ;;
+    "${SHELL_OPT_UP}" | "${SHELL_OPT_LOW}")
+      echo "Entering shell, to leave type exit and press Enter or press LCtrl+D"
+      echo ""
+      ${CMD_SHELL}
+
+      # If in submenu before going to shell - return to main menu after exiting
+      # shell:
+      unset DES_SUBMENU_ACTIVE
+      ;;
+    "${POWEROFF_OPT_UP}" | "${POWEROFF_OPT_LOW}")
+      ${CMD_POWEROFF}
+      ;;
+    "${REBOOT_OPT_UP}" | "${REBOOT_OPT_LOW}")
+      ${CMD_REBOOT}
+      ;;
+  esac
+
+  return 1
 }
